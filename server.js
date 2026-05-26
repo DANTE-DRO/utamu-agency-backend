@@ -7,41 +7,34 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({
-  origin: '*',
-  credentials: true
-}));
+app.use(cors({ origin: '*' }));
 
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Create folders
 const uploadDir = 'uploads';
-const dataDir = 'data';
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
 
-// Multer
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
 });
 
-const upload = multer({ 
-  storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 }
-});
+const upload = multer({ storage: storage });
 
-const applicationsFile = path.join(dataDir, 'applications.json');
+const applicationsFile = path.join('data', 'applications.json');
+if (!fs.existsSync('data')) fs.mkdirSync('data');
 if (!fs.existsSync(applicationsFile)) {
-  fs.writeFileSync(applicationsFile, JSON.stringify([], null, 2));
+  fs.writeFileSync(applicationsFile, JSON.stringify([]));
 }
 
 // Routes
-app.get('/', (req, res) => res.send('Utamu Backend Running 🚀'));
+app.get('/', (req, res) => res.send('✅ Utamu Backend is Running'));
 
 app.post('/api/signup', (req, res) => res.json({ success: true }));
-app.post('/api/login', (req, res) => res.json({ success: true, token: 'fake-jwt-' + Date.now(), user: { username: req.body.username } }));
+app.post('/api/login', (req, res) => res.json({ success: true, token: 'fake-token', user: { username: req.body.username } }));
 
 app.post('/api/apply', upload.fields([
   { name: 'profilePicture', maxCount: 1 },
@@ -50,25 +43,23 @@ app.post('/api/apply', upload.fields([
   { name: 'nudeVideos', maxCount: 3 }
 ]), (req, res) => {
   try {
-    const application = {
+    const appData = {
       id: 'APP-' + Date.now(),
-      timestamp: new Date().toISOString(),
-      formData: req.body,
-      files: {
-        profilePicture: req.files.profilePicture ? req.files.profilePicture[0].filename : null,
-        classyPhotos: req.files.classyPhotos ? req.files.classyPhotos.map(f => f.filename) : [],
-        nudePhotos: req.files.nudePhotos ? req.files.nudePhotos.map(f => f.filename) : [],
-        nudeVideos: req.files.nudeVideos ? req.files.nudeVideos.map(f => f.filename) : []
-      }
+      date: new Date().toISOString(),
+      data: req.body,
+      files: Object.keys(req.files).reduce((acc, key) => {
+        acc[key] = req.files[key].map(f => f.filename);
+        return acc;
+      }, {})
     };
 
     let apps = JSON.parse(fs.readFileSync(applicationsFile));
-    apps.unshift(application);
+    apps.unshift(appData);
     fs.writeFileSync(applicationsFile, JSON.stringify(apps, null, 2));
 
-    res.json({ success: true, applicationId: application.id });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.json({ success: true, id: appData.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
