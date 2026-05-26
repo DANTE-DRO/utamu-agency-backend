@@ -7,32 +7,29 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS - Fixed for Netlify
 app.use(cors({
-  origin: ['https://utamuagency.netlify.app', 'http://localhost:3000', '*'],
+  origin: '*',
   credentials: true
 }));
-
-app.options('*', cors());
 
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// Folders
+// Create folders
 const uploadDir = 'uploads';
 const dataDir = 'data';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
-// Multer for files (including nude photos & videos)
+// Multer
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
 });
 
 const upload = multer({ 
-  storage, 
-  limits: { fileSize: 100 * 1024 * 1024 } 
+  storage: storage,
+  limits: { fileSize: 100 * 1024 * 1024 }
 });
 
 const applicationsFile = path.join(dataDir, 'applications.json');
@@ -41,21 +38,11 @@ if (!fs.existsSync(applicationsFile)) {
 }
 
 // Routes
-app.get('/', (req, res) => res.json({ status: "ok", message: "Utamu Backend Running" }));
+app.get('/', (req, res) => res.send('Utamu Backend Running 🚀'));
 
-app.post('/api/signup', (req, res) => {
-  res.json({ success: true, message: "Account created" });
-});
+app.post('/api/signup', (req, res) => res.json({ success: true }));
+app.post('/api/login', (req, res) => res.json({ success: true, token: 'fake-jwt-' + Date.now(), user: { username: req.body.username } }));
 
-app.post('/api/login', (req, res) => {
-  res.json({ 
-    success: true, 
-    token: "fake-jwt-" + Date.now(),
-    user: { username: req.body.username || "user" }
-  });
-});
-
-// Apply Route - Saves everything
 app.post('/api/apply', upload.fields([
   { name: 'profilePicture', maxCount: 1 },
   { name: 'classyPhotos', maxCount: 2 },
@@ -79,28 +66,16 @@ app.post('/api/apply', upload.fields([
     apps.unshift(application);
     fs.writeFileSync(applicationsFile, JSON.stringify(apps, null, 2));
 
-    res.json({
-      success: true,
-      applicationId: application.id,
-      message: "Application submitted successfully",
-      welcomeLetterUrl: /api/welcome/${application.id}
-    });
+    res.json({ success: true, applicationId: application.id });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// Serve Nude Photos & Videos
 app.use('/uploads', express.static('uploads'));
-
-// View All Applications (including file links)
 app.get('/api/applications', (req, res) => {
   const apps = JSON.parse(fs.readFileSync(applicationsFile));
   res.json(apps);
 });
 
-app.get('/api/welcome/:id', (req, res) => {
-  res.send(<h2>Welcome to Utamu Agency</h2><p>Application ID: ${req.params.id}<br>Your application is under review.</p>);
-});
-
-app.listen(PORT, () => console.log(🚀 Server running on port ${PORT}));
+app.listen(PORT, () => console.log(Server running on port ${PORT}));
