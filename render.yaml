@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: utamu-agency-backend
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    plan: starter
+    envVars:
+      - key: NODE_VERSION
+        value: 20.18.0
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_PASSWORD
+        value: 11monari72dan
+      - key: FRONTEND_URL
+        value: https://your-site.netlify.app
+      - key: DATA_DIR
+        value: /opt/render/project/src/data

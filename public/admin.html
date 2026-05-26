@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Utamu Admin Portal</title>
+  <style>
+    :root {
+      --gold: #d4af37;
+      --gold-dark: #a8861f;
+      --bg: #0a0a0a;
+      --card: #161616;
+      --card-2: #1e1e1e;
+      --text: #f5f5f5;
+      --muted: #b8b8b8;
+      --line: rgba(212,175,55,.22);
+      --danger: #ff6b6b;
+      --success: #2ed573;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, Arial, sans-serif;
+      background: linear-gradient(180deg, #080808, #121212);
+      color: var(--text);
+    }
+    .shell {
+      min-height: 100vh;
+      padding: 24px;
+    }
+    .hero, .card {
+      background: linear-gradient(145deg, rgba(30,30,30,.96), rgba(10,10,10,.98));
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.35);
+    }
+    .hero {
+      padding: 28px;
+      margin-bottom: 22px;
+    }
+    .brand {
+      font-family: Georgia, serif;
+      color: var(--gold);
+      letter-spacing: 4px;
+      font-size: 28px;
+      margin-bottom: 6px;
+    }
+    .subtitle {
+      color: var(--muted);
+      margin: 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 22px;
+    }
+    .card {
+      padding: 22px;
+    }
+    .field {
+      margin-bottom: 14px;
+    }
+    .field label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--gold);
+      font-size: 13px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+    .field input {
+      width: 100%;
+      padding: 14px 16px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #0f0f0f;
+      color: var(--text);
+      outline: none;
+    }
+    .btn {
+      width: 100%;
+      border: none;
+      cursor: pointer;
+      padding: 14px 18px;
+      border-radius: 12px;
+      font-weight: 700;
+      letter-spacing: .7px;
+      background: linear-gradient(135deg, var(--gold), var(--gold-dark));
+      color: #111;
+    }
+    .btn.secondary {
+      width: auto;
+      background: transparent;
+      color: var(--gold);
+      border: 1px solid var(--line);
+    }
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 18px;
+    }
+    .toolbar .left, .toolbar .right {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .search {
+      min-width: 280px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #0f0f0f;
+      color: var(--text);
+    }
+    .hidden { display: none !important; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .stat {
+      background: var(--card-2);
+      border: 1px solid var(--line);
+      padding: 16px;
+      border-radius: 16px;
+    }
+    .stat small { color: var(--muted); display: block; margin-bottom: 6px; }
+    .stat strong { color: var(--gold); font-size: 28px; }
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 920px;
+    }
+    th, td {
+      padding: 14px 12px;
+      border-bottom: 1px solid rgba(255,255,255,.07);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--gold);
+      background: rgba(212,175,55,.06);
+      position: sticky;
+      top: 0;
+    }
+    .pill {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--gold);
+      font-size: 12px;
+    }
+    .muted { color: var(--muted); }
+    .detail {
+      margin-top: 18px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+    }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+    }
+    .kv {
+      background: var(--card-2);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+    }
+    .kv small { color: var(--muted); display: block; margin-bottom: 6px; }
+    .files {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .file-card {
+      background: var(--card-2);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+    }
+    .file-card a {
+      color: var(--gold);
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .alert {
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      display: none;
+    }
+    .alert.error { background: rgba(255,107,107,.12); color: var(--danger); border: 1px solid rgba(255,107,107,.45); }
+    .alert.success { background: rgba(46,213,115,.12); color: var(--success); border: 1px solid rgba(46,213,115,.45); }
+    .empty {
+      padding: 30px;
+      text-align: center;
+      color: var(--muted);
+    }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+      .stats, .detail-grid, .files { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="brand">UTAMU ADMIN</div>
+      <p class="subtitle">Secure application review, file downloads, and CSV export.</p>
+    </section>
+
+    <div class="grid">
+      <aside class="card" id="loginCard">
+        <h2 style="margin-top:0;color:var(--gold)">Admin Login</h2>
+        <p class="subtitle">Use the admin password to open the application vault.</p>
+        <div class="field">
+          <label>Admin password</label>
+          <input id="adminPassword" type="password" placeholder="Enter admin password" />
+        </div>
+        <button class="btn" id="loginBtn">Open Portal</button>
+        <div class="alert error" id="loginError"></div>
+        <div class="alert success" id="loginSuccess"></div>
+      </aside>
+
+      <main class="card hidden" id="dashboardCard">
+        <div class="toolbar">
+          <div class="left">
+            <input class="search" id="searchInput" placeholder="Search by username, name, phone, email, application ID" />
+            <button class="btn secondary" id="refreshBtn">Refresh</button>
+          </div>
+          <div class="right">
+            <button class="btn secondary" id="exportBtn">Download CSV</button>
+            <button class="btn secondary" id="logoutBtn">Logout</button>
+          </div>
+        </div>
+
+        <div class="stats">
+          <div class="stat"><small>Total applications</small><strong id="statApplications">0</strong></div>
+          <div class="stat"><small>Total uploaded files</small><strong id="statFiles">0</strong></div>
+          <div class="stat"><small>Last submission</small><strong id="statLast" style="font-size:16px">—</strong></div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Application ID</th>
+                <th>Submitted</th>
+                <th>Username</th>
+                <th>Official Name</th>
+                <th>M-Pesa</th>
+                <th>WhatsApp</th>
+                <th>Email</th>
+                <th>Files</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="applicationsBody">
+              <tr><td colspan="9" class="empty">No applications yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <section class="detail hidden" id="detailSection">
+          <h3 style="color:var(--gold);margin-top:0">Application Details</h3>
+          <div class="detail-grid" id="detailFields"></div>
+          <h4 style="color:var(--gold);margin-bottom:10px">Uploaded Files</h4>
+          <div class="files" id="detailFiles"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    const tokenKey = 'utamu_admin_token';
+    const loginCard = document.getElementById('loginCard');
+    const dashboardCard = document.getElementById('dashboardCard');
+    const bodyEl = document.getElementById('applicationsBody');
+    const detailSection = document.getElementById('detailSection');
+    const detailFields = document.getElementById('detailFields');
+    const detailFiles = document.getElementById('detailFiles');
+    let allApplications = [];
+
+    function showAlert(id, message, type) {
+      const el = document.getElementById(id);
+      el.textContent = message;
+      el.className = 'alert ' + type;
+      el.style.display = 'block';
+      setTimeout(() => { el.style.display = 'none'; }, 4000);
+    }
+
+    function getToken() {
+      return localStorage.getItem(tokenKey);
+    }
+
+    async function api(path, options = {}) {
+      const headers = options.headers || {};
+      const token = getToken();
+      if (token) headers.Authorization = 'Bearer ' + token;
+      const response = await fetch(path, { ...options, headers });
+      if (!response.ok) {
+        let message = 'Request failed';
+        try {
+          const data = await response.json();
+          message = data.error || message;
+        } catch (_) {}
+        throw new Error(message);
+      }
+      return response;
+    }
+
+    async function login() {
+      const password = document.getElementById('adminPassword').value.trim();
+      if (!password) return showAlert('loginError', 'Enter the admin password', 'error');
+      try {
+        const res = await fetch('/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Login failed');
+        localStorage.setItem(tokenKey, data.token);
+        showAlert('loginSuccess', 'Portal unlocked successfully', 'success');
+        openDashboard();
+      } catch (error) {
+        showAlert('loginError', error.message, 'error');
+      }
+    }
+
+    function openDashboard() {
+      loginCard.classList.add('hidden');
+      dashboardCard.classList.remove('hidden');
+      loadApplications();
+    }
+
+    function logout() {
+      localStorage.removeItem(tokenKey);
+      dashboardCard.classList.add('hidden');
+      loginCard.classList.remove('hidden');
+      detailSection.classList.add('hidden');
+    }
+
+    function renderTable(items) {
+      if (!items.length) {
+        bodyEl.innerHTML = '<tr><td colspan="9" class="empty">No matching applications found.</td></tr>';
+        return;
+      }
+      bodyEl.innerHTML = items.map(app => `
+        <tr>
+          <td><span class="pill">${app.applicationId}</span></td>
+          <td>${new Date(app.createdAt).toLocaleString()}</td>
+          <td>${app.username || '<span class="muted">—</span>'}</td>
+          <td>${app.officialName || '<span class="muted">—</span>'}</td>
+          <td>${app.mpesaNumber || '<span class="muted">—</span>'}</td>
+          <td>${app.whatsappNumber || '<span class="muted">—</span>'}</td>
+          <td>${app.email || '<span class="muted">—</span>'}</td>
+          <td>${app.totalFiles}</td>
+          <td><button class="btn secondary" onclick="openDetails('${app.applicationId}')">View</button></td>
+        </tr>
+      `).join('');
+    }
+
+    function updateStats(applications) {
+      document.getElementById('statApplications').textContent = applications.length;
+      document.getElementById('statFiles').textContent = applications.reduce((sum, item) => sum + (item.totalFiles || 0), 0);
+      document.getElementById('statLast').textContent = applications[0] ? new Date(applications[0].createdAt).toLocaleString() : '—';
+    }
+
+    async function loadApplications() {
+      try {
+        const res = await api('/api/admin/applications');
+        const data = await res.json();
+        allApplications = data.applications || [];
+        renderTable(allApplications);
+        updateStats(allApplications);
+      } catch (error) {
+        if (error.message.toLowerCase().includes('token')) logout();
+        alert(error.message);
+      }
+    }
+
+    async function openDetails(id) {
+      try {
+        const res = await api('/api/admin/applications/' + encodeURIComponent(id));
+        const data = await res.json();
+        const app = data.application;
+        detailSection.classList.remove('hidden');
+        const form = app.form || {};
+        const entries = Object.entries(form);
+        detailFields.innerHTML = entries.map(([key, value]) => `
+          <div class="kv">
+            <small>${key}</small>
+            <div>${String(value || '—')}</div>
+          </div>
+        `).join('');
+        detailFiles.innerHTML = (app.files || []).map(file => `
+          <div class="file-card">
+            <div style="margin-bottom:8px"><strong>${file.originalName}</strong></div>
+            <div class="muted" style="margin-bottom:6px">${file.category} · ${Math.round((file.size || 0) / 1024)} KB</div>
+            <div class="muted" style="margin-bottom:12px">${file.mimeType || 'unknown'}</div>
+            <button class="btn secondary" onclick="downloadFile('${file.id}', '${String(file.originalName || 'download').replace(/'/g, "\\'")}')">Download file</button>
+          </div>
+        `).join('') || '<div class="empty">No files uploaded for this application.</div>';
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    function filterApplications() {
+      const q = document.getElementById('searchInput').value.toLowerCase().trim();
+      if (!q) return renderTable(allApplications);
+      const filtered = allApplications.filter(app => {
+        return [
+          app.applicationId,
+          app.username,
+          app.officialName,
+          app.mpesaNumber,
+          app.whatsappNumber,
+          app.email
+        ].some(value => String(value || '').toLowerCase().includes(q));
+      });
+      renderTable(filtered);
+    }
+
+    async function exportCsv() {
+      try {
+        const res = await api('/api/admin/export/csv');
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'utamu-applications.csv';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    async function downloadFile(fileId, fileName) {
+      try {
+        const res = await api('/api/admin/files/' + encodeURIComponent(fileId));
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName || 'download';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    document.getElementById('loginBtn').addEventListener('click', login);
+    document.getElementById('refreshBtn').addEventListener('click', loadApplications);
+    document.getElementById('logoutBtn').addEventListener('click', logout);
+    document.getElementById('exportBtn').addEventListener('click', exportCsv);
+    document.getElementById('searchInput').addEventListener('input', filterApplications);
+    document.getElementById('adminPassword').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') login();
+    });
+
+    if (getToken()) openDashboard();
+  </script>
+</body>
+</html>
