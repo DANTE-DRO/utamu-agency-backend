@@ -1,15 +1,17 @@
 services:
   - type: web
     name: utamu-agency-backend
-    env: node
+    runtime: node
     plan: free
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: node server.js
     envVars:
       - key: JWT_SECRET
         generateValue: true
-      - key: ADMIN_PASSWORD
-        value: 11monari72dan
+      - key: ADMIN_USER
+        value: admin
+      - key: ADMIN_PASS
+        value: utamu2025
       - key: DATA_DIR
         value: /var/data
     disk:
