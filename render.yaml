@@ -4,15 +4,19 @@ services:
     env: node
     plan: free
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: node server.js
+    disk:
+      name: utamu-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: JWT_SECRET
         generateValue: true
+      - key: ADMIN_EMAIL
+        value: utamugency@gmail.com
       - key: ADMIN_PASSWORD
         value: 11monari72dan
       - key: DATA_DIR
-        value: /var/data
-    disk:
-      name: utamu-data
-      mountPath: /var/data
-      sizeGB: 1
+        value: /opt/render/project/src/data

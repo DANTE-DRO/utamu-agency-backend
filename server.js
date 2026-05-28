@@ -1,528 +1,443 @@
-/* =========================================================
-   UTAMU AGENCY — PRODUCTION BACKEND
-   Node.js + Express + JSON Storage + File Uploads + Admin Panel
-   Deploy: Render.com (Web Service, Node 18+)
-   ========================================================= */
+/**
+ * ================================================================
+ *  UTAMU AGENCY - BACKEND SERVER
+ *  Professional Member & Application Management System
+ *  Author: Utamu Agency
+ *  Stack:  Node.js + Express + SQLite (persistent) + Multer
+ * ================================================================
+ */
 
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const multer = require('multer');
-const PDFDocument = require('pdfkit');
+const express   = require('express');
+const cors      = require('cors');
+const multer    = require('multer');
+const bcrypt    = require('bcryptjs');
+const jwt       = require('jsonwebtoken');
+const Database  = require('better-sqlite3');
+const path      = require('path');
+const fs        = require('fs');
+const archiver  = require('archiver');
 require('dotenv').config();
 
-const app = express();
-const PORT = process.env.PORT || 5000;
+const app  = express();
+const PORT = process.env.PORT || 10000;
 
-/* ========== CONFIG ========== */
-const JWT_SECRET = process.env.JWT_SECRET || 'utamu_super_secret_key_change_me_2026';
+/* ---------- CONFIG ---------- */
+const JWT_SECRET     = process.env.JWT_SECRET     || 'utamu_secret_change_me';
+const ADMIN_EMAIL    = process.env.ADMIN_EMAIL    || 'utamugency@gmail.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '11monari72dan';
 
-/* ========== STORAGE PATHS ==========
-   On Render free tier, the filesystem is EPHEMERAL (resets on redeploy).
-   For persistent storage, attach a Render Disk and mount it at /var/data
-   then set env: DATA_DIR=/var/data
-========================================================= */
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+/* ---------- PATHS (persistent on Render disk if mounted at /data) ---------- */
+const DATA_DIR    = process.env.DATA_DIR || path.join(__dirname, 'data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const APPS_FILE = path.join(DATA_DIR, 'applications.json');
+const DB_PATH     = path.join(DATA_DIR, 'utamu.db');
 
-[DATA_DIR, UPLOADS_DIR].forEach(d => { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); });
-if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, '[]');
-if (!fs.existsSync(APPS_FILE)) fs.writeFileSync(APPS_FILE, '[]');
+if (!fs.existsSync(DATA_DIR))    fs.mkdirSync(DATA_DIR,    { recursive: true });
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-const readJSON = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return []; } };
-const writeJSON = (f, data) => fs.writeFileSync(f, JSON.stringify(data, null, 2));
-
-/* ========== MIDDLEWARE ========== */
-app.use(cors({ origin: '*', credentials: false }));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Serve uploaded files publicly (so the welcome letter download link works)
+/* ---------- MIDDLEWARE ---------- */
+app.use(cors({ origin: '*', credentials: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-/* ========== MULTER (file uploads) ========== */
+/* ---------- DATABASE ---------- */
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  username      TEXT UNIQUE NOT NULL,
+  email         TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  reset_token   TEXT,
+  reset_expires INTEGER,
+  created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS applications (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  username        TEXT,
+  official_name   TEXT,
+  email           TEXT,
+  mpesa_number    TEXT,
+  whatsapp_number TEXT,
+  county          TEXT,
+  category        TEXT,
+  profile_picture TEXT,
+  classy_photos   TEXT,
+  other_photos    TEXT,
+  videos          TEXT,
+  agreed_share    INTEGER,
+  confirmed_18    INTEGER,
+  status          TEXT DEFAULT 'pending',
+  notes           TEXT,
+  created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS admin_credentials (
+  id            INTEGER PRIMARY KEY CHECK (id = 1),
+  email         TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+`);
+
+/* Seed admin row once */
+const adminRow = db.prepare('SELECT * FROM admin_credentials WHERE id = 1').get();
+if (!adminRow) {
+  const hash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
+  db.prepare('INSERT INTO admin_credentials (id, email, password_hash) VALUES (1, ?, ?)')
+    .run(ADMIN_EMAIL, hash);
+  console.log('✔ Admin account initialised:', ADMIN_EMAIL);
+}
+
+/* ---------- MULTER (file upload) ---------- */
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const appId = req.applicationId || 'temp';
-    const dir = path.join(UPLOADS_DIR, appId);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-    cb(null, `${file.fieldname}_${Date.now()}_${safe}`);
+  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+  filename:    (req, file, cb) => {
+    const safe = file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    cb(null, Date.now() + '-' + Math.round(Math.random()*1e9) + '-' + safe);
   }
 });
 const upload = multer({
   storage,
-  limits: { fileSize: 100 * 1024 * 1024 } // 100 MB per file (videos)
+  limits: { fileSize: 100 * 1024 * 1024 } // 100 MB per file
 });
 
-// Assign an application ID BEFORE multer saves files (so they go in the right folder)
-function assignAppId(req, res, next) {
-  req.applicationId = 'APP-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8).toUpperCase();
-  next();
+/* ---------- AUTH HELPERS ---------- */
+function signUserToken(user) {
+  return jwt.sign({ id: user.id, username: user.username, role: 'member' }, JWT_SECRET, { expiresIn: '7d' });
 }
-
-/* ========== AUTH MIDDLEWARE ========== */
-function authUser(req, res, next) {
+function signAdminToken() {
+  return jwt.sign({ role: 'admin', email: ADMIN_EMAIL }, JWT_SECRET, { expiresIn: '7d' });
+}
+function requireAdmin(req, res, next) {
   const auth = req.headers.authorization || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-  if (!token) return res.status(401).json({ error: 'No token provided' });
+  const token = auth.replace('Bearer ', '');
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    req.admin = decoded;
     next();
-  } catch {
-    res.status(401).json({ error: 'Invalid or expired token' });
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
 
-function authAdmin(req, res, next) {
-  const pass = req.headers['x-admin-password'] || req.query.password || req.body?.password;
-  if (pass !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized — wrong admin password' });
-  next();
-}
+/* ================================================================
+                          API ROUTES
+================================================================ */
 
-/* ========== ROUTES ========== */
-
-app.get('/', (req, res) => {
+app.get('/', (_, res) => {
   res.json({
-    name: 'Utamu Agency API',
-    status: 'online',
+    service: 'Utamu Agency Backend',
+    status:  'online',
     version: '1.0.0',
     endpoints: {
-      signup: 'POST /api/signup',
-      login: 'POST /api/login',
-      apply: 'POST /api/apply (multipart/form-data, Bearer token)',
-      admin_login: 'GET /admin (browser)',
-      admin_api: 'GET /api/admin/applications (x-admin-password header)'
+      auth:        ['POST /api/signup', 'POST /api/login', 'POST /api/forgot-password', 'POST /api/reset-password'],
+      application: ['POST /api/apply'],
+      admin:       ['POST /api/admin/login', 'GET /api/admin/applications', 'GET /api/admin/users',
+                    'PUT /api/admin/application/:id', 'DELETE /api/admin/application/:id',
+                    'POST /api/admin/change-password', 'GET /api/admin/export/:id', 'GET /api/admin/export-all']
     }
   });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+app.get('/api/health', (_, res) => res.json({ status: 'healthy', time: new Date().toISOString() }));
 
-/* ---------- SIGNUP ---------- */
-app.post('/api/signup', async (req, res) => {
+/* ---------- USER SIGNUP ---------- */
+app.post('/api/signup', (req, res) => {
   try {
-    const { email, username, password } = req.body || {};
-    if (!email || !username || !password)
-      return res.status(400).json({ error: 'Email, username and password are required' });
+    const { username, email, password } = req.body;
+    if (!username || !email || !password)
+      return res.status(400).json({ error: 'All fields are required' });
     if (password.length < 6)
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
-    const users = readJSON(USERS_FILE);
-    if (users.find(u => u.username.toLowerCase() === username.toLowerCase()))
-      return res.status(400).json({ error: 'Username already taken' });
-    if (users.find(u => u.email.toLowerCase() === email.toLowerCase()))
-      return res.status(400).json({ error: 'Email already registered' });
+    const hash = bcrypt.hashSync(password, 10);
+    const info = db.prepare(
+      'INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)'
+    ).run(username.trim(), email.trim().toLowerCase(), hash);
 
-    const hash = await bcrypt.hash(password, 10);
-    const user = {
-      id: 'USR-' + Date.now(),
-      email: email.trim(),
-      username: username.trim(),
-      password: hash,
-      createdAt: new Date().toISOString()
-    };
-    users.push(user);
-    writeJSON(USERS_FILE, users);
-
-    res.json({ success: true, message: 'Account created successfully' });
-  } catch (err) {
-    console.error('Signup error:', err);
-    res.status(500).json({ error: 'Server error during signup' });
+    const user = db.prepare('SELECT id, username, email FROM users WHERE id = ?').get(info.lastInsertRowid);
+    const token = signUserToken(user);
+    res.json({ success: true, message: 'Account created', token, user });
+  } catch (e) {
+    if (e.message.includes('UNIQUE'))
+      return res.status(409).json({ error: 'Username or email already exists' });
+    res.status(500).json({ error: e.message });
   }
 });
 
-/* ---------- LOGIN ---------- */
-app.post('/api/login', async (req, res) => {
+/* ---------- USER LOGIN ---------- */
+app.post('/api/login', (req, res) => {
   try {
-    const { username, password } = req.body || {};
-    if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+    const { username, password } = req.body;
+    if (!username || !password)
+      return res.status(400).json({ error: 'Username and password required' });
 
-    const users = readJSON(USERS_FILE);
-    const user = users.find(u => u.username.toLowerCase() === username.toLowerCase());
-    if (!user) return res.status(401).json({ error: 'Invalid username or password' });
+    const user = db.prepare('SELECT * FROM users WHERE username = ? OR email = ?')
+                   .get(username.trim(), username.trim().toLowerCase());
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const ok = await bcrypt.compare(password, user.password);
-    if (!ok) return res.status(401).json({ error: 'Invalid username or password' });
+    const ok = bcrypt.compareSync(password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
+    const token = signUserToken(user);
     res.json({
       success: true,
       token,
       user: { id: user.id, username: user.username, email: user.email }
     });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ error: 'Server error during login' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-/* ---------- APPLY (multipart form with files) ---------- */
-const applyUpload = upload.fields([
-  { name: 'profilePicture', maxCount: 1 },
-  { name: 'classyPhotos', maxCount: 2 },
-  { name: 'nudePhotos', maxCount: 3 },
-  { name: 'nudeVideos', maxCount: 3 }
-]);
-
-app.post('/api/apply', authUser, assignAppId, applyUpload, async (req, res) => {
+/* ---------- FORGOT PASSWORD ---------- */
+app.post('/api/forgot-password', (req, res) => {
   try {
-    const body = req.body || {};
-    const files = req.files || {};
+    const { email } = req.body;
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.trim().toLowerCase());
+    if (!user) return res.json({ success: true, message: 'If that email exists, instructions were sent.' });
 
-    const application = {
-      id: req.applicationId,
-      submittedAt: new Date().toISOString(),
-      submittedBy: req.user.username,
-      userId: req.user.id,
-      personal: {
-        username: body.username || req.user.username,
-        officialName: body.officialName || '',
-        mpesa: body.mpesa || '',
-        whatsapp: body.whatsapp || '',
-        email: body.email || ''
-      },
-      consent: body.consent === 'true' || body.consent === true,
-      files: {
-        profilePicture: (files.profilePicture || []).map(f => fileMeta(f, req.applicationId)),
-        classyPhotos: (files.classyPhotos || []).map(f => fileMeta(f, req.applicationId)),
-        nudePhotos: (files.nudePhotos || []).map(f => fileMeta(f, req.applicationId)),
-        nudeVideos: (files.nudeVideos || []).map(f => fileMeta(f, req.applicationId))
-      },
-      status: 'pending'
-    };
+    const token = Math.random().toString(36).substring(2, 10).toUpperCase();
+    const expires = Date.now() + 1000*60*30; // 30 min
+    db.prepare('UPDATE users SET reset_token = ?, reset_expires = ? WHERE id = ?')
+      .run(token, expires, user.id);
 
-    // Generate welcome PDF
-    const pdfPath = path.join(UPLOADS_DIR, req.applicationId, 'welcome-letter.pdf');
-    await generateWelcomePDF(pdfPath, application);
-    application.welcomeLetterUrl = `/uploads/${req.applicationId}/welcome-letter.pdf`;
-
-    // Save application
-    const apps = readJSON(APPS_FILE);
-    apps.push(application);
-    writeJSON(APPS_FILE, apps);
-
+    // In production, send via email. For demo, we return the token so user can copy/paste.
     res.json({
       success: true,
-      applicationId: application.id,
-      welcomeLetterUrl: application.welcomeLetterUrl,
-      message: 'Application submitted successfully'
+      message: 'Reset code generated. Use it within 30 minutes.',
+      resetCode: token   // remove this in production once email service is wired
     });
-  } catch (err) {
-    console.error('Apply error:', err);
-    res.status(500).json({ error: 'Failed to submit application: ' + err.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-function fileMeta(f, appId) {
-  return {
-    originalName: f.originalname,
-    storedName: f.filename,
-    size: f.size,
-    mimetype: f.mimetype,
-    url: `/uploads/${appId}/${f.filename}`
-  };
-}
+/* ---------- RESET PASSWORD ---------- */
+app.post('/api/reset-password', (req, res) => {
+  try {
+    const { email, resetCode, newPassword } = req.body;
+    if (!email || !resetCode || !newPassword)
+      return res.status(400).json({ error: 'All fields are required' });
+    if (newPassword.length < 6)
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
-/* ---------- WELCOME PDF GENERATOR ---------- */
-function generateWelcomePDF(filePath, app) {
-  return new Promise((resolve, reject) => {
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.trim().toLowerCase());
+    if (!user || user.reset_token !== resetCode)
+      return res.status(400).json({ error: 'Invalid reset code' });
+    if (Date.now() > user.reset_expires)
+      return res.status(400).json({ error: 'Reset code expired' });
+
+    const hash = bcrypt.hashSync(newPassword, 10);
+    db.prepare('UPDATE users SET password_hash = ?, reset_token = NULL, reset_expires = NULL WHERE id = ?')
+      .run(hash, user.id);
+
+    res.json({ success: true, message: 'Password reset successfully' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+/* ---------- APPLY NOW (Mombasa Hookup Weekends etc.) ---------- */
+app.post('/api/apply',
+  upload.fields([
+    { name: 'profile_picture', maxCount: 1 },
+    { name: 'classy_photos',   maxCount: 2 },
+    { name: 'other_photos',    maxCount: 3 },
+    { name: 'videos',          maxCount: 3 }
+  ]),
+  (req, res) => {
     try {
-      const doc = new PDFDocument({ size: 'A4', margins: { top: 60, bottom: 60, left: 60, right: 60 } });
-      const stream = fs.createWriteStream(filePath);
-      doc.pipe(stream);
+      const b = req.body;
+      const f = req.files || {};
 
-      // Gold accent header
-      doc.rect(0, 0, doc.page.width, 8).fill('#d4af37');
-      doc.fillColor('#000').moveDown(2);
+      const profile_picture = f.profile_picture ? f.profile_picture[0].filename : null;
+      const classy_photos   = (f.classy_photos || []).map(x => x.filename);
+      const other_photos    = (f.other_photos  || []).map(x => x.filename);
+      const videos          = (f.videos        || []).map(x => x.filename);
 
-      doc.font('Helvetica-Bold').fontSize(28).fillColor('#d4af37').text('UTAMU AGENCY', { align: 'center' });
-      doc.fontSize(10).fillColor('#666').text('LUXURY COMPANIONSHIP · PREMIUM EXPERIENCES', { align: 'center', characterSpacing: 3 });
-      doc.moveDown(2);
-
-      doc.fontSize(20).fillColor('#000').font('Helvetica-Bold').text('Welcome to the Elite Circle', { align: 'center' });
-      doc.moveDown(1.5);
-
-      doc.fontSize(11).font('Helvetica').fillColor('#222');
-      doc.text(`Dear ${app.personal.officialName || app.personal.username},`, { align: 'left' });
-      doc.moveDown();
-      doc.text(
-        'Thank you for applying to join Utamu Agency — Kenya\'s premier luxury companionship network. ' +
-        'Your application has been received and securely stored in our private database. ' +
-        'Our admin team will personally review your submission and reach out via WhatsApp within 24 hours.',
-        { align: 'justify', lineGap: 4 }
-      );
-      doc.moveDown();
-      doc.text(
-        'What happens next: We verify your details, schedule a private interview, and onboard you into our ' +
-        'vetted client booking system. Successful applicants enjoy industry-leading earnings, full safety ' +
-        'support, and a clear path to international (Dubai) opportunities.',
-        { align: 'justify', lineGap: 4 }
-      );
-      doc.moveDown(2);
-
-      // Application details box
-      doc.rect(60, doc.y, doc.page.width - 120, 130).strokeColor('#d4af37').lineWidth(1.5).stroke();
-      const boxY = doc.y + 12;
-      doc.fontSize(12).font('Helvetica-Bold').fillColor('#d4af37').text('APPLICATION DETAILS', 75, boxY);
-      doc.fontSize(10).font('Helvetica').fillColor('#000');
-      doc.text(`Application ID: ${app.id}`, 75, boxY + 22);
-      doc.text(`Submitted: ${new Date(app.submittedAt).toLocaleString()}`, 75, boxY + 38);
-      doc.text(`Username: ${app.personal.username}`, 75, boxY + 54);
-      doc.text(`Name: ${app.personal.officialName}`, 75, boxY + 70);
-      doc.text(`WhatsApp: ${app.personal.whatsapp}`, 75, boxY + 86);
-      doc.text(`Email: ${app.personal.email}`, 75, boxY + 102);
-
-      doc.y = boxY + 140;
-      doc.moveDown(2);
-      doc.fontSize(10).fillColor('#666').font('Helvetica-Oblique').text(
-        'This document is confidential. All applicant data is encrypted and used solely by Utamu Agency for client booking purposes. We never share your data with third parties.',
-        { align: 'center', lineGap: 3 }
+      const info = db.prepare(`
+        INSERT INTO applications
+        (username, official_name, email, mpesa_number, whatsapp_number, county, category,
+         profile_picture, classy_photos, other_photos, videos,
+         agreed_share, confirmed_18)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        b.username,
+        b.official_name,
+        b.email,
+        b.mpesa_number,
+        b.whatsapp_number,
+        b.county,
+        b.category || 'Mombasa Hookup Weekends',
+        profile_picture,
+        JSON.stringify(classy_photos),
+        JSON.stringify(other_photos),
+        JSON.stringify(videos),
+        b.agreed_share === 'true' ? 1 : 0,
+        b.confirmed_18 === 'true' ? 1 : 0
       );
 
-      doc.moveDown(2);
-      doc.fontSize(11).fillColor('#d4af37').font('Helvetica-Bold').text('— Utamu Agency Team', { align: 'right' });
-      doc.fontSize(9).fillColor('#888').font('Helvetica').text('WhatsApp: +254 700 000 000', { align: 'right' });
-
-      // Gold footer line
-      doc.rect(0, doc.page.height - 8, doc.page.width, 8).fill('#d4af37');
-
-      doc.end();
-      stream.on('finish', resolve);
-      stream.on('error', reject);
-    } catch (e) { reject(e); }
-  });
-}
-
-/* ============================================================
-   ADMIN PANEL (browser UI at /admin)
-   ============================================================ */
-app.get('/admin', (req, res) => {
-  res.send(adminLoginPage());
-});
-
-app.post('/admin', (req, res) => {
-  const { password } = req.body || {};
-  if (password !== ADMIN_PASSWORD) {
-    return res.send(adminLoginPage('Wrong password. Try again.'));
+      res.json({
+        success: true,
+        message: 'Application submitted successfully',
+        application_id: info.lastInsertRowid
+      });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: e.message });
+    }
   }
-  res.send(adminDashboardPage());
+);
+
+/* ================================================================
+                       ADMIN ROUTES
+================================================================ */
+
+/* ---------- ADMIN LOGIN ---------- */
+app.post('/api/admin/login', (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const admin = db.prepare('SELECT * FROM admin_credentials WHERE id = 1').get();
+    if (!admin) return res.status(500).json({ error: 'Admin not configured' });
+
+    if (email.trim().toLowerCase() !== admin.email.toLowerCase())
+      return res.status(401).json({ error: 'Invalid admin credentials' });
+
+    const ok = bcrypt.compareSync(password, admin.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Invalid admin credentials' });
+
+    const token = signAdminToken();
+    res.json({ success: true, token, email: admin.email });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-/* Admin API: list applications */
-app.get('/api/admin/applications', authAdmin, (req, res) => {
-  const apps = readJSON(APPS_FILE);
-  res.json({ count: apps.length, applications: apps.slice().reverse() });
+/* ---------- ADMIN CHANGE PASSWORD ---------- */
+app.post('/api/admin/change-password', requireAdmin, (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const admin = db.prepare('SELECT * FROM admin_credentials WHERE id = 1').get();
+    const ok = bcrypt.compareSync(currentPassword, admin.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Current password incorrect' });
+    if (!newPassword || newPassword.length < 6)
+      return res.status(400).json({ error: 'New password must be at least 6 chars' });
+
+    const hash = bcrypt.hashSync(newPassword, 10);
+    db.prepare('UPDATE admin_credentials SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1')
+      .run(hash);
+    res.json({ success: true, message: 'Admin password updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-/* Admin API: list users */
-app.get('/api/admin/users', authAdmin, (req, res) => {
-  const users = readJSON(USERS_FILE).map(u => ({ id: u.id, username: u.username, email: u.email, createdAt: u.createdAt }));
-  res.json({ count: users.length, users });
+/* ---------- ADMIN: LIST APPLICATIONS ---------- */
+app.get('/api/admin/applications', requireAdmin, (req, res) => {
+  const rows = db.prepare('SELECT * FROM applications ORDER BY created_at DESC').all();
+  const parsed = rows.map(r => ({
+    ...r,
+    classy_photos: safeParse(r.classy_photos),
+    other_photos:  safeParse(r.other_photos),
+    videos:        safeParse(r.videos)
+  }));
+  res.json({ success: true, count: parsed.length, applications: parsed });
 });
 
-/* Admin API: download a specific file (with password gate) */
-app.get('/api/admin/file/:appId/:filename', authAdmin, (req, res) => {
-  const { appId, filename } = req.params;
-  const filePath = path.join(UPLOADS_DIR, appId, filename);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
-  res.download(filePath);
+/* ---------- ADMIN: LIST USERS ---------- */
+app.get('/api/admin/users', requireAdmin, (req, res) => {
+  const users = db.prepare('SELECT id, username, email, created_at FROM users ORDER BY created_at DESC').all();
+  res.json({ success: true, count: users.length, users });
 });
 
-/* Admin API: download all files for an application as zip-like listing */
-app.get('/api/admin/application/:id', authAdmin, (req, res) => {
-  const apps = readJSON(APPS_FILE);
-  const app = apps.find(a => a.id === req.params.id);
-  if (!app) return res.status(404).json({ error: 'Application not found' });
-  res.json(app);
-});
-
-/* Admin API: delete application */
-app.delete('/api/admin/application/:id', authAdmin, (req, res) => {
-  let apps = readJSON(APPS_FILE);
-  const target = apps.find(a => a.id === req.params.id);
-  if (!target) return res.status(404).json({ error: 'Not found' });
-  apps = apps.filter(a => a.id !== req.params.id);
-  writeJSON(APPS_FILE, apps);
-  // Remove files folder
-  const folder = path.join(UPLOADS_DIR, req.params.id);
-  if (fs.existsSync(folder)) fs.rmSync(folder, { recursive: true, force: true });
+/* ---------- ADMIN: UPDATE APPLICATION (status, notes) ---------- */
+app.put('/api/admin/application/:id', requireAdmin, (req, res) => {
+  const { status, notes } = req.body;
+  db.prepare('UPDATE applications SET status = COALESCE(?, status), notes = COALESCE(?, notes) WHERE id = ?')
+    .run(status, notes, req.params.id);
   res.json({ success: true });
 });
 
-/* ========== ADMIN HTML PAGES ========== */
-function adminLoginPage(error = '') {
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Utamu Admin Login</title>
-<style>
-body{margin:0;font-family:'Segoe UI',sans-serif;background:#0a0a0a;color:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh;}
-.box{background:#1a1a1a;border:1px solid #d4af37;border-radius:16px;padding:50px 40px;width:100%;max-width:400px;text-align:center;box-shadow:0 20px 60px rgba(212,175,55,.2);}
-h1{font-family:Georgia,serif;color:#d4af37;letter-spacing:6px;margin:0 0 10px;}
-p{color:#888;font-size:.85rem;letter-spacing:2px;margin-bottom:30px;}
-input{width:100%;padding:14px;background:rgba(255,255,255,.05);border:1px solid rgba(212,175,55,.3);border-radius:8px;color:#fff;font-size:1rem;outline:none;}
-input:focus{border-color:#d4af37;}
-button{width:100%;margin-top:20px;padding:14px;background:linear-gradient(135deg,#d4af37,#a8861f);color:#000;border:none;border-radius:8px;font-weight:700;letter-spacing:2px;cursor:pointer;text-transform:uppercase;}
-button:hover{opacity:.9;}
-.err{background:rgba(255,71,87,.15);border:1px solid #ff4757;color:#ff4757;padding:10px;border-radius:8px;margin-bottom:15px;font-size:.85rem;}
-.hint{margin-top:20px;color:#666;font-size:.75rem;}
-</style></head><body>
-<form class="box" method="POST" action="/admin">
-<h1>UTAMU</h1><p>ADMIN PORTAL</p>
-${error ? `<div class="err">${error}</div>` : ''}
-<input type="password" name="password" placeholder="Admin Password" required autofocus>
-<button type="submit">Access Dashboard</button>
-<div class="hint">Authorized personnel only.</div>
-</form></body></html>`;
-}
-
-function adminDashboardPage() {
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Utamu Admin Dashboard</title>
-<style>
-*{box-sizing:border-box;}body{margin:0;font-family:'Segoe UI',sans-serif;background:#0a0a0a;color:#f5f5f5;}
-header{background:#141414;border-bottom:2px solid #d4af37;padding:20px 30px;display:flex;justify-content:space-between;align-items:center;}
-header h1{font-family:Georgia,serif;color:#d4af37;margin:0;letter-spacing:4px;font-size:1.5rem;}
-.logout{background:transparent;border:1px solid #d4af37;color:#d4af37;padding:8px 18px;border-radius:6px;cursor:pointer;text-decoration:none;font-size:.85rem;}
-.logout:hover{background:#d4af37;color:#000;}
-.container{padding:30px;}
-.tabs{display:flex;gap:10px;margin-bottom:25px;}
-.tab{padding:10px 20px;background:#1a1a1a;border:1px solid rgba(212,175,55,.3);color:#fff;border-radius:6px;cursor:pointer;}
-.tab.active{background:#d4af37;color:#000;border-color:#d4af37;}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:25px;}
-.stat{background:#1a1a1a;border:1px solid rgba(212,175,55,.2);border-radius:10px;padding:20px;}
-.stat .num{font-size:2rem;color:#d4af37;font-weight:700;}
-.stat .lbl{color:#888;font-size:.85rem;letter-spacing:1px;text-transform:uppercase;}
-.card{background:#1a1a1a;border:1px solid rgba(212,175,55,.2);border-radius:10px;padding:20px;margin-bottom:15px;}
-.card h3{color:#d4af37;margin:0 0 10px;}
-.row{display:flex;flex-wrap:wrap;gap:20px;color:#ddd;font-size:.9rem;margin-bottom:10px;}
-.row span b{color:#d4af37;}
-.files{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;}
-.files a{padding:6px 12px;background:rgba(212,175,55,.1);border:1px solid #d4af37;color:#d4af37;text-decoration:none;border-radius:6px;font-size:.8rem;}
-.files a:hover{background:#d4af37;color:#000;}
-.empty{text-align:center;padding:60px;color:#666;}
-.del{background:transparent;border:1px solid #ff4757;color:#ff4757;padding:5px 12px;border-radius:5px;cursor:pointer;font-size:.75rem;margin-left:10px;}
-.del:hover{background:#ff4757;color:#fff;}
-.section{display:none;}.section.active{display:block;}
-table{width:100%;border-collapse:collapse;background:#1a1a1a;border-radius:10px;overflow:hidden;}
-th,td{padding:12px;text-align:left;border-bottom:1px solid rgba(212,175,55,.1);}
-th{background:rgba(212,175,55,.1);color:#d4af37;}
-</style></head><body>
-<header>
-<h1>UTAMU · ADMIN DASHBOARD</h1>
-<a class="logout" href="/admin">Logout</a>
-</header>
-<div class="container">
-<div class="tabs">
-<div class="tab active" onclick="showTab('apps',this)">Applications</div>
-<div class="tab" onclick="showTab('users',this)">Users</div>
-</div>
-
-<div id="apps" class="section active">
-<div class="stats" id="appStats"></div>
-<div id="appsList"></div>
-</div>
-
-<div id="users" class="section">
-<div class="stats" id="userStats"></div>
-<div id="usersList"></div>
-</div>
-</div>
-
-<script>
-const PASS = ${JSON.stringify(ADMIN_PASSWORD)};
-const headers = {'x-admin-password': PASS};
-
-function showTab(id, el){
-  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
-  el.classList.add('active');
-  if(id==='users') loadUsers();
-}
-
-async function loadApps(){
-  const r = await fetch('/api/admin/applications',{headers});
-  const j = await r.json();
-  document.getElementById('appStats').innerHTML = 
-    '<div class="stat"><div class="num">'+j.count+'</div><div class="lbl">Total Applications</div></div>';
-  const list = document.getElementById('appsList');
-  if(!j.count) return list.innerHTML = '<div class="empty">No applications yet.</div>';
-  list.innerHTML = j.applications.map(a => renderApp(a)).join('');
-}
-
-function renderApp(a){
-  const allFiles = [
-    ...(a.files.profilePicture||[]).map(f=>({...f,cat:'Profile'})),
-    ...(a.files.classyPhotos||[]).map(f=>({...f,cat:'Classy'})),
-    ...(a.files.nudePhotos||[]).map(f=>({...f,cat:'Nude Photo'})),
-    ...(a.files.nudeVideos||[]).map(f=>({...f,cat:'Nude Video'})),
-  ];
-  return '<div class="card"><h3>'+a.id+
-    ' <button class="del" onclick="delApp(\\''+a.id+'\\')">Delete</button></h3>'+
-    '<div class="row">'+
-    '<span><b>Name:</b> '+escapeHtml(a.personal.officialName||'-')+'</span>'+
-    '<span><b>Username:</b> '+escapeHtml(a.personal.username||'-')+'</span>'+
-    '<span><b>Submitted by:</b> '+escapeHtml(a.submittedBy||'-')+'</span>'+
-    '<span><b>Date:</b> '+new Date(a.submittedAt).toLocaleString()+'</span>'+
-    '</div>'+
-    '<div class="row">'+
-    '<span><b>M-Pesa:</b> '+escapeHtml(a.personal.mpesa||'-')+'</span>'+
-    '<span><b>WhatsApp:</b> '+escapeHtml(a.personal.whatsapp||'-')+'</span>'+
-    '<span><b>Email:</b> '+escapeHtml(a.personal.email||'-')+'</span>'+
-    '<span><b>Consent:</b> '+(a.consent?'✓ Yes':'✗ No')+'</span>'+
-    '</div>'+
-    '<div><b style="color:#d4af37">Files ('+allFiles.length+'):</b></div>'+
-    '<div class="files">'+
-    allFiles.map(f=>'<a href="/api/admin/file/'+a.id+'/'+encodeURIComponent(f.storedName)+'?password='+encodeURIComponent(PASS)+'" target="_blank">'+f.cat+': '+escapeHtml(f.originalName)+' ('+formatSize(f.size)+')</a>').join('')+
-    '<a href="/uploads/'+a.id+'/welcome-letter.pdf" target="_blank" style="background:rgba(46,213,115,.1);border-color:#2ed573;color:#2ed573;">📄 Welcome Letter PDF</a>'+
-    '</div></div>';
-}
-
-function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
-function formatSize(b){if(!b)return '0B';const u=['B','KB','MB','GB'];let i=0;while(b>=1024&&i<u.length-1){b/=1024;i++;}return b.toFixed(1)+u[i];}
-
-async function delApp(id){
-  if(!confirm('Delete application '+id+' and all its files?')) return;
-  await fetch('/api/admin/application/'+id,{method:'DELETE',headers});
-  loadApps();
-}
-
-async function loadUsers(){
-  const r = await fetch('/api/admin/users',{headers});
-  const j = await r.json();
-  document.getElementById('userStats').innerHTML = 
-    '<div class="stat"><div class="num">'+j.count+'</div><div class="lbl">Total Users</div></div>';
-  const list = document.getElementById('usersList');
-  if(!j.count) return list.innerHTML = '<div class="empty">No users yet.</div>';
-  list.innerHTML = '<table><tr><th>ID</th><th>Username</th><th>Email</th><th>Joined</th></tr>'+
-    j.users.map(u=>'<tr><td>'+u.id+'</td><td>'+escapeHtml(u.username)+'</td><td>'+escapeHtml(u.email)+'</td><td>'+new Date(u.createdAt).toLocaleString()+'</td></tr>').join('')+
-    '</table>';
-}
-
-loadApps();
-</script>
-</body></html>`;
-}
-
-/* ========== ERROR HANDLER ========== */
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  if (err instanceof multer.MulterError) {
-    return res.status(400).json({ error: 'Upload error: ' + err.message });
+/* ---------- ADMIN: DELETE APPLICATION ---------- */
+app.delete('/api/admin/application/:id', requireAdmin, (req, res) => {
+  const app = db.prepare('SELECT * FROM applications WHERE id = ?').get(req.params.id);
+  if (app) {
+    [app.profile_picture, ...safeParse(app.classy_photos),
+     ...safeParse(app.other_photos), ...safeParse(app.videos)]
+       .filter(Boolean).forEach(fn => {
+         const p = path.join(UPLOADS_DIR, fn);
+         if (fs.existsSync(p)) fs.unlinkSync(p);
+       });
   }
-  res.status(500).json({ error: err.message || 'Internal server error' });
+  db.prepare('DELETE FROM applications WHERE id = ?').run(req.params.id);
+  res.json({ success: true });
 });
 
-/* ========== START ========== */
+/* ---------- ADMIN: EXPORT APPLICATION AS ZIP ---------- */
+app.get('/api/admin/export/:id', requireAdmin, (req, res) => {
+  const app = db.prepare('SELECT * FROM applications WHERE id = ?').get(req.params.id);
+  if (!app) return res.status(404).json({ error: 'Not found' });
+
+  res.attachment(`application-${app.id}-${app.username}.zip`);
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.pipe(res);
+
+  const meta = {
+    ...app,
+    classy_photos: safeParse(app.classy_photos),
+    other_photos:  safeParse(app.other_photos),
+    videos:        safeParse(app.videos)
+  };
+  archive.append(JSON.stringify(meta, null, 2), { name: 'application.json' });
+
+  [app.profile_picture, ...safeParse(app.classy_photos),
+   ...safeParse(app.other_photos), ...safeParse(app.videos)]
+     .filter(Boolean).forEach(fn => {
+       const p = path.join(UPLOADS_DIR, fn);
+       if (fs.existsSync(p)) archive.file(p, { name: fn });
+     });
+  archive.finalize();
+});
+
+/* ---------- ADMIN: EXPORT ALL DATA ---------- */
+app.get('/api/admin/export-all', requireAdmin, (req, res) => {
+  const apps = db.prepare('SELECT * FROM applications ORDER BY created_at DESC').all();
+  const users = db.prepare('SELECT id, username, email, created_at FROM users').all();
+
+  res.attachment(`utamu-export-${Date.now()}.zip`);
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.pipe(res);
+  archive.append(JSON.stringify({ applications: apps, users }, null, 2), { name: 'export.json' });
+
+  // CSV
+  const headers = ['id','username','official_name','email','mpesa_number','whatsapp_number','county','category','status','created_at'];
+  const csv = [headers.join(',')].concat(
+    apps.map(a => headers.map(h => `"${(a[h]||'').toString().replace(/"/g,'""')}"`).join(','))
+  ).join('\n');
+  archive.append(csv, { name: 'applications.csv' });
+
+  // Append all media files
+  apps.forEach(app => {
+    [app.profile_picture, ...safeParse(app.classy_photos),
+     ...safeParse(app.other_photos), ...safeParse(app.videos)]
+       .filter(Boolean).forEach(fn => {
+         const p = path.join(UPLOADS_DIR, fn);
+         if (fs.existsSync(p)) archive.file(p, { name: `media/${app.id}/${fn}` });
+       });
+  });
+  archive.finalize();
+});
+
+/* ---------- UTIL ---------- */
+function safeParse(s) {
+  try { return JSON.parse(s) || []; } catch { return []; }
+}
+
+/* ---------- START ---------- */
 app.listen(PORT, () => {
-  console.log(`✓ Utamu backend running on port ${PORT}`);
-  console.log(`✓ Data dir: ${DATA_DIR}`);
-  console.log(`✓ Admin URL: http://localhost:${PORT}/admin`);
+  console.log('╔════════════════════════════════════════════╗');
+  console.log('║   UTAMU AGENCY BACKEND IS RUNNING          ║');
+  console.log('╠════════════════════════════════════════════╣');
+  console.log(`║   Port:        ${PORT.toString().padEnd(28)}║`);
+  console.log(`║   Data dir:    ${DATA_DIR.padEnd(28)}║`);
+  console.log(`║   Admin email: ${ADMIN_EMAIL.padEnd(28)}║`);
+  console.log('╚════════════════════════════════════════════╝');
 });
