@@ -1,443 +1,512 @@
-/**
- * ================================================================
- *  UTAMU AGENCY - BACKEND SERVER
- *  Professional Member & Application Management System
- *  Author: Utamu Agency
- *  Stack:  Node.js + Express + SQLite (persistent) + Multer
- * ================================================================
- */
+// ELITE FITNESS — Backend API
+// Node.js + Express + SQLite (persistent on Render via /var/data disk or local file)
+// Endpoints:
+//   POST /api/submit         - public form submission
+//   POST /api/admin/login    - admin password login (returns token)
+//   GET  /api/admin/entries  - list all entries (auth)
+//   DELETE /api/admin/entries/:id - delete one (auth)
+//   DELETE /api/admin/entries    - delete all (auth)
+//   GET  /api/admin/export   - CSV export (auth)
+//   GET  /admin              - admin panel UI
 
-const express   = require('express');
-const cors      = require('cors');
-const multer    = require('multer');
-const bcrypt    = require('bcryptjs');
-const jwt       = require('jsonwebtoken');
-const Database  = require('better-sqlite3');
-const path      = require('path');
-const fs        = require('fs');
-const archiver  = require('archiver');
-require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const Database = require('better-sqlite3');
 
-const app  = express();
 const PORT = process.env.PORT || 10000;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '11kenya72';
 
-/* ---------- CONFIG ---------- */
-const JWT_SECRET     = process.env.JWT_SECRET     || 'utamu_secret_change_me';
-const ADMIN_EMAIL    = process.env.ADMIN_EMAIL    || 'utamugency@gmail.com';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '11monari72dan';
-
-/* ---------- PATHS (persistent on Render disk if mounted at /data) ---------- */
-const DATA_DIR    = process.env.DATA_DIR || path.join(__dirname, 'data');
-const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-const DB_PATH     = path.join(DATA_DIR, 'utamu.db');
-
-if (!fs.existsSync(DATA_DIR))    fs.mkdirSync(DATA_DIR,    { recursive: true });
-if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-
-/* ---------- MIDDLEWARE ---------- */
-app.use(cors({ origin: '*', credentials: true }));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-app.use('/uploads', express.static(UPLOADS_DIR));
-
-/* ---------- DATABASE ---------- */
+// ----- DATABASE (persistent) -----
+// On Render, attach a Disk and mount it at /var/data for persistence across deploys/restarts.
+// Falls back to local ./data folder during development.
+const DATA_DIR = fs.existsSync('/var/data') ? '/var/data' : path.join(__dirname, 'data');
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+const DB_PATH = path.join(DATA_DIR, 'fitness.db');
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
 db.exec(`
-CREATE TABLE IF NOT EXISTS users (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  username      TEXT UNIQUE NOT NULL,
-  email         TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
-  reset_token   TEXT,
-  reset_expires INTEGER,
-  created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  residency TEXT NOT NULL,
+  goal TEXT NOT NULL,
+  level TEXT NOT NULL,
+  weight TEXT NOT NULL,
+  frequency TEXT NOT NULL,
+  injuries TEXT NOT NULL,
+  experience TEXT NOT NULL,
+  timeline TEXT NOT NULL,
+  createdAt TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS applications (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  username        TEXT,
-  official_name   TEXT,
-  email           TEXT,
-  mpesa_number    TEXT,
-  whatsapp_number TEXT,
-  county          TEXT,
-  category        TEXT,
-  profile_picture TEXT,
-  classy_photos   TEXT,
-  other_photos    TEXT,
-  videos          TEXT,
-  agreed_share    INTEGER,
-  confirmed_18    INTEGER,
-  status          TEXT DEFAULT 'pending',
-  notes           TEXT,
-  created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS admin_credentials (
-  id            INTEGER PRIMARY KEY CHECK (id = 1),
-  email         TEXT NOT NULL,
-  password_hash TEXT NOT NULL,
-  updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS tokens (
+  token TEXT PRIMARY KEY,
+  createdAt TEXT NOT NULL
 );
 `);
 
-/* Seed admin row once */
-const adminRow = db.prepare('SELECT * FROM admin_credentials WHERE id = 1').get();
-if (!adminRow) {
-  const hash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
-  db.prepare('INSERT INTO admin_credentials (id, email, password_hash) VALUES (1, ?, ?)')
-    .run(ADMIN_EMAIL, hash);
-  console.log('✔ Admin account initialised:', ADMIN_EMAIL);
-}
+// ----- APP -----
+const app = express();
+app.use(cors({ origin: '*' }));
+app.use(express.json({ limit: '1mb' }));
 
-/* ---------- MULTER (file upload) ---------- */
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-  filename:    (req, file, cb) => {
-    const safe = file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-    cb(null, Date.now() + '-' + Math.round(Math.random()*1e9) + '-' + safe);
-  }
-});
-const upload = multer({
-  storage,
-  limits: { fileSize: 100 * 1024 * 1024 } // 100 MB per file
-});
-
-/* ---------- AUTH HELPERS ---------- */
-function signUserToken(user) {
-  return jwt.sign({ id: user.id, username: user.username, role: 'member' }, JWT_SECRET, { expiresIn: '7d' });
-}
-function signAdminToken() {
-  return jwt.sign({ role: 'admin', email: ADMIN_EMAIL }, JWT_SECRET, { expiresIn: '7d' });
-}
-function requireAdmin(req, res, next) {
+// ----- HELPERS -----
+function requireAuth(req, res, next) {
   const auth = req.headers.authorization || '';
-  const token = auth.replace('Bearer ', '');
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-    req.admin = decoded;
-    next();
-  } catch (e) {
-    return res.status(401).json({ error: 'Invalid or expired token' });
-  }
+  const token = auth.replace(/^Bearer\s+/i, '').trim() || req.query.token;
+  if (!token) return res.status(401).json({ success:false, message:'No token' });
+  const row = db.prepare('SELECT token FROM tokens WHERE token = ?').get(token);
+  if (!row) return res.status(401).json({ success:false, message:'Invalid token' });
+  next();
 }
 
-/* ================================================================
-                          API ROUTES
-================================================================ */
+function sanitize(s){ return String(s == null ? '' : s).trim().slice(0, 500); }
 
-app.get('/', (_, res) => {
-  res.json({
-    service: 'Utamu Agency Backend',
-    status:  'online',
-    version: '1.0.0',
-    endpoints: {
-      auth:        ['POST /api/signup', 'POST /api/login', 'POST /api/forgot-password', 'POST /api/reset-password'],
-      application: ['POST /api/apply'],
-      admin:       ['POST /api/admin/login', 'GET /api/admin/applications', 'GET /api/admin/users',
-                    'PUT /api/admin/application/:id', 'DELETE /api/admin/application/:id',
-                    'POST /api/admin/change-password', 'GET /api/admin/export/:id', 'GET /api/admin/export-all']
+// ----- ROUTES -----
+app.get('/', (req,res) => {
+  res.send(`
+    <html><head><title>Elite Fitness API</title>
+    <style>body{font-family:sans-serif;background:#000;color:#d4af37;padding:40px;text-align:center}
+    a{color:#d4af37}</style></head>
+    <body>
+      <h1>👑 Elite Fitness API</h1>
+      <p>Backend is running.</p>
+      <p><a href="/admin">→ Admin Panel</a></p>
+      <p style="color:#888;font-size:.8rem">DB: ${DB_PATH}</p>
+    </body></html>
+  `);
+});
+
+app.get('/api/health', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
+
+// Public form submit
+app.post('/api/submit', (req, res) => {
+  try {
+    const fields = ['name','email','phone','residency','goal','level','weight','frequency','injuries','experience','timeline'];
+    const data = {};
+    for (const f of fields) {
+      data[f] = sanitize(req.body[f]);
+      if (!data[f]) return res.status(400).json({ success:false, message:`Field ${f} required` });
     }
-  });
-});
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(data.email))
+      return res.status(400).json({ success:false, message:'Invalid email' });
 
-app.get('/api/health', (_, res) => res.json({ status: 'healthy', time: new Date().toISOString() }));
-
-/* ---------- USER SIGNUP ---------- */
-app.post('/api/signup', (req, res) => {
-  try {
-    const { username, email, password } = req.body;
-    if (!username || !email || !password)
-      return res.status(400).json({ error: 'All fields are required' });
-    if (password.length < 6)
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
-
-    const hash = bcrypt.hashSync(password, 10);
-    const info = db.prepare(
-      'INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)'
-    ).run(username.trim(), email.trim().toLowerCase(), hash);
-
-    const user = db.prepare('SELECT id, username, email FROM users WHERE id = ?').get(info.lastInsertRowid);
-    const token = signUserToken(user);
-    res.json({ success: true, message: 'Account created', token, user });
-  } catch (e) {
-    if (e.message.includes('UNIQUE'))
-      return res.status(409).json({ error: 'Username or email already exists' });
-    res.status(500).json({ error: e.message });
+    const createdAt = new Date().toISOString();
+    const stmt = db.prepare(`
+      INSERT INTO entries (name,email,phone,residency,goal,level,weight,frequency,injuries,experience,timeline,createdAt)
+      VALUES (@name,@email,@phone,@residency,@goal,@level,@weight,@frequency,@injuries,@experience,@timeline,@createdAt)
+    `);
+    const result = stmt.run({ ...data, createdAt });
+    const entry = db.prepare('SELECT * FROM entries WHERE id = ?').get(result.lastInsertRowid);
+    res.json({ success:true, entry });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success:false, message:'Server error' });
   }
 });
 
-/* ---------- USER LOGIN ---------- */
-app.post('/api/login', (req, res) => {
-  try {
-    const { username, password } = req.body;
-    if (!username || !password)
-      return res.status(400).json({ error: 'Username and password required' });
-
-    const user = db.prepare('SELECT * FROM users WHERE username = ? OR email = ?')
-                   .get(username.trim(), username.trim().toLowerCase());
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const ok = bcrypt.compareSync(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const token = signUserToken(user);
-    res.json({
-      success: true,
-      token,
-      user: { id: user.id, username: user.username, email: user.email }
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-/* ---------- FORGOT PASSWORD ---------- */
-app.post('/api/forgot-password', (req, res) => {
-  try {
-    const { email } = req.body;
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.trim().toLowerCase());
-    if (!user) return res.json({ success: true, message: 'If that email exists, instructions were sent.' });
-
-    const token = Math.random().toString(36).substring(2, 10).toUpperCase();
-    const expires = Date.now() + 1000*60*30; // 30 min
-    db.prepare('UPDATE users SET reset_token = ?, reset_expires = ? WHERE id = ?')
-      .run(token, expires, user.id);
-
-    // In production, send via email. For demo, we return the token so user can copy/paste.
-    res.json({
-      success: true,
-      message: 'Reset code generated. Use it within 30 minutes.',
-      resetCode: token   // remove this in production once email service is wired
-    });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-/* ---------- RESET PASSWORD ---------- */
-app.post('/api/reset-password', (req, res) => {
-  try {
-    const { email, resetCode, newPassword } = req.body;
-    if (!email || !resetCode || !newPassword)
-      return res.status(400).json({ error: 'All fields are required' });
-    if (newPassword.length < 6)
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
-
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.trim().toLowerCase());
-    if (!user || user.reset_token !== resetCode)
-      return res.status(400).json({ error: 'Invalid reset code' });
-    if (Date.now() > user.reset_expires)
-      return res.status(400).json({ error: 'Reset code expired' });
-
-    const hash = bcrypt.hashSync(newPassword, 10);
-    db.prepare('UPDATE users SET password_hash = ?, reset_token = NULL, reset_expires = NULL WHERE id = ?')
-      .run(hash, user.id);
-
-    res.json({ success: true, message: 'Password reset successfully' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-/* ---------- APPLY NOW (Mombasa Hookup Weekends etc.) ---------- */
-app.post('/api/apply',
-  upload.fields([
-    { name: 'profile_picture', maxCount: 1 },
-    { name: 'classy_photos',   maxCount: 2 },
-    { name: 'other_photos',    maxCount: 3 },
-    { name: 'videos',          maxCount: 3 }
-  ]),
-  (req, res) => {
-    try {
-      const b = req.body;
-      const f = req.files || {};
-
-      const profile_picture = f.profile_picture ? f.profile_picture[0].filename : null;
-      const classy_photos   = (f.classy_photos || []).map(x => x.filename);
-      const other_photos    = (f.other_photos  || []).map(x => x.filename);
-      const videos          = (f.videos        || []).map(x => x.filename);
-
-      const info = db.prepare(`
-        INSERT INTO applications
-        (username, official_name, email, mpesa_number, whatsapp_number, county, category,
-         profile_picture, classy_photos, other_photos, videos,
-         agreed_share, confirmed_18)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-      `).run(
-        b.username,
-        b.official_name,
-        b.email,
-        b.mpesa_number,
-        b.whatsapp_number,
-        b.county,
-        b.category || 'Mombasa Hookup Weekends',
-        profile_picture,
-        JSON.stringify(classy_photos),
-        JSON.stringify(other_photos),
-        JSON.stringify(videos),
-        b.agreed_share === 'true' ? 1 : 0,
-        b.confirmed_18 === 'true' ? 1 : 0
-      );
-
-      res.json({
-        success: true,
-        message: 'Application submitted successfully',
-        application_id: info.lastInsertRowid
-      });
-    } catch (e) {
-      console.error(e);
-      res.status(500).json({ error: e.message });
-    }
-  }
-);
-
-/* ================================================================
-                       ADMIN ROUTES
-================================================================ */
-
-/* ---------- ADMIN LOGIN ---------- */
+// Admin login
 app.post('/api/admin/login', (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const admin = db.prepare('SELECT * FROM admin_credentials WHERE id = 1').get();
-    if (!admin) return res.status(500).json({ error: 'Admin not configured' });
-
-    if (email.trim().toLowerCase() !== admin.email.toLowerCase())
-      return res.status(401).json({ error: 'Invalid admin credentials' });
-
-    const ok = bcrypt.compareSync(password, admin.password_hash);
-    if (!ok) return res.status(401).json({ error: 'Invalid admin credentials' });
-
-    const token = signAdminToken();
-    res.json({ success: true, token, email: admin.email });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  const { password } = req.body || {};
+  if (password !== ADMIN_PASSWORD) return res.status(401).json({ success:false, message:'Wrong password' });
+  const token = crypto.randomBytes(32).toString('hex');
+  db.prepare('INSERT INTO tokens (token,createdAt) VALUES (?,?)').run(token, new Date().toISOString());
+  res.json({ success:true, token });
 });
 
-/* ---------- ADMIN CHANGE PASSWORD ---------- */
-app.post('/api/admin/change-password', requireAdmin, (req, res) => {
-  try {
-    const { currentPassword, newPassword } = req.body;
-    const admin = db.prepare('SELECT * FROM admin_credentials WHERE id = 1').get();
-    const ok = bcrypt.compareSync(currentPassword, admin.password_hash);
-    if (!ok) return res.status(401).json({ error: 'Current password incorrect' });
-    if (!newPassword || newPassword.length < 6)
-      return res.status(400).json({ error: 'New password must be at least 6 chars' });
-
-    const hash = bcrypt.hashSync(newPassword, 10);
-    db.prepare('UPDATE admin_credentials SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1')
-      .run(hash);
-    res.json({ success: true, message: 'Admin password updated' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+// Admin: list entries
+app.get('/api/admin/entries', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT * FROM entries ORDER BY id DESC').all();
+  res.json({ success:true, entries: rows });
 });
 
-/* ---------- ADMIN: LIST APPLICATIONS ---------- */
-app.get('/api/admin/applications', requireAdmin, (req, res) => {
-  const rows = db.prepare('SELECT * FROM applications ORDER BY created_at DESC').all();
-  const parsed = rows.map(r => ({
-    ...r,
-    classy_photos: safeParse(r.classy_photos),
-    other_photos:  safeParse(r.other_photos),
-    videos:        safeParse(r.videos)
-  }));
-  res.json({ success: true, count: parsed.length, applications: parsed });
+// Admin: delete one
+app.delete('/api/admin/entries/:id', requireAuth, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const r = db.prepare('DELETE FROM entries WHERE id = ?').run(id);
+  res.json({ success:true, deleted:r.changes });
 });
 
-/* ---------- ADMIN: LIST USERS ---------- */
-app.get('/api/admin/users', requireAdmin, (req, res) => {
-  const users = db.prepare('SELECT id, username, email, created_at FROM users ORDER BY created_at DESC').all();
-  res.json({ success: true, count: users.length, users });
+// Admin: delete all
+app.delete('/api/admin/entries', requireAuth, (req, res) => {
+  const r = db.prepare('DELETE FROM entries').run();
+  res.json({ success:true, deleted:r.changes });
 });
 
-/* ---------- ADMIN: UPDATE APPLICATION (status, notes) ---------- */
-app.put('/api/admin/application/:id', requireAdmin, (req, res) => {
-  const { status, notes } = req.body;
-  db.prepare('UPDATE applications SET status = COALESCE(?, status), notes = COALESCE(?, notes) WHERE id = ?')
-    .run(status, notes, req.params.id);
-  res.json({ success: true });
+// Admin: CSV export
+app.get('/api/admin/export', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT * FROM entries ORDER BY id DESC').all();
+  const headers = ['id','name','email','phone','residency','goal','level','weight','frequency','injuries','experience','timeline','createdAt'];
+  const escape = (v) => `"${String(v==null?'':v).replace(/"/g,'""')}"`;
+  const csv = [headers.join(',')]
+    .concat(rows.map(r => headers.map(h => escape(r[h])).join(',')))
+    .join('\n');
+  res.setHeader('Content-Type','text/csv');
+  res.setHeader('Content-Disposition','attachment; filename="elite-fitness-entries.csv"');
+  res.send(csv);
 });
 
-/* ---------- ADMIN: DELETE APPLICATION ---------- */
-app.delete('/api/admin/application/:id', requireAdmin, (req, res) => {
-  const app = db.prepare('SELECT * FROM applications WHERE id = ?').get(req.params.id);
-  if (app) {
-    [app.profile_picture, ...safeParse(app.classy_photos),
-     ...safeParse(app.other_photos), ...safeParse(app.videos)]
-       .filter(Boolean).forEach(fn => {
-         const p = path.join(UPLOADS_DIR, fn);
-         if (fs.existsSync(p)) fs.unlinkSync(p);
-       });
+// Admin: logout
+app.post('/api/admin/logout', requireAuth, (req, res) => {
+  const auth = req.headers.authorization || '';
+  const token = auth.replace(/^Bearer\s+/i, '').trim();
+  db.prepare('DELETE FROM tokens WHERE token = ?').run(token);
+  res.json({ success:true });
+});
+
+// ----- ADMIN PANEL UI -----
+app.get('/admin', (req, res) => {
+  res.send(ADMIN_HTML);
+});
+
+// ----- HTML for admin -----
+const ADMIN_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Elite Fitness — Admin Panel</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<style>
+:root{--gold:#d4af37;--gold-light:#f4d97a;--gold-deep:#a8862a;--black:#000;--black-soft:#0a0a0a;--black-card:#111;--black-border:#1c1c1c;--text:#f5f5f5;--text-dim:#a0a0a0}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#000;color:var(--text);min-height:100vh}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-track{background:#000}::-webkit-scrollbar-thumb{background:linear-gradient(var(--gold),var(--gold-deep));border-radius:5px}
+
+/* LOGIN */
+.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem;
+  background:radial-gradient(circle at 30% 50%,rgba(212,175,55,.1),transparent 60%),#000}
+.login-card{background:linear-gradient(135deg,var(--black-card),var(--black-soft));
+  border:1px solid var(--gold);border-radius:20px;padding:3rem;max-width:430px;width:100%;
+  box-shadow:0 20px 80px rgba(212,175,55,.2);text-align:center}
+.crown{width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,var(--gold-light),var(--gold-deep));
+  display:flex;align-items:center;justify-content:center;font-size:2rem;color:#000;margin:0 auto 1.5rem}
+.login-card h1{font-family:'Cinzel',serif;color:var(--gold);font-size:1.8rem;letter-spacing:3px;margin-bottom:.5rem}
+.login-card p{color:var(--text-dim);font-size:.9rem;margin-bottom:2rem}
+.login-card input{width:100%;padding:1rem;background:rgba(0,0,0,.5);border:1px solid var(--black-border);
+  border-radius:10px;color:#fff;font-size:1rem;margin-bottom:1rem;transition:.3s}
+.login-card input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(212,175,55,.15)}
+.btn-gold{width:100%;padding:1rem;background:linear-gradient(135deg,var(--gold-light),var(--gold),var(--gold-deep));
+  color:#000;font-weight:700;border:none;border-radius:50px;cursor:pointer;letter-spacing:2px;text-transform:uppercase;
+  font-size:.95rem;transition:.3s;box-shadow:0 10px 30px rgba(212,175,55,.3);font-family:'Inter',sans-serif}
+.btn-gold:hover{transform:translateY(-2px);box-shadow:0 15px 40px rgba(212,175,55,.5)}
+.btn-gold:disabled{opacity:.5;cursor:not-allowed}
+.alert{padding:.8rem;border-radius:8px;margin-bottom:1rem;font-size:.85rem;display:none}
+.alert.error{background:rgba(220,53,69,.15);color:#ff6b7a;border:1px solid #dc3545;display:block}
+
+/* PANEL */
+.dashboard{display:none}
+.dashboard.active{display:block}
+.topbar{background:linear-gradient(135deg,#000,#0a0a0a);padding:1.2rem 2rem;
+  border-bottom:1px solid rgba(212,175,55,.2);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;
+  position:sticky;top:0;z-index:100;backdrop-filter:blur(10px)}
+.topbar .brand{font-family:'Cinzel',serif;font-size:1.4rem;letter-spacing:3px;
+  background:linear-gradient(135deg,var(--gold-light),var(--gold));-webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  display:flex;align-items:center;gap:.7rem}
+.topbar .brand i{color:var(--gold);-webkit-text-fill-color:var(--gold)}
+.topbar-actions{display:flex;gap:.7rem;flex-wrap:wrap}
+.btn-sm{padding:.6rem 1.2rem;border-radius:30px;border:1px solid var(--gold);
+  background:transparent;color:var(--gold);cursor:pointer;font-size:.8rem;letter-spacing:1px;text-transform:uppercase;
+  transition:.3s;font-family:'Inter',sans-serif;display:inline-flex;align-items:center;gap:.4rem}
+.btn-sm:hover{background:var(--gold);color:#000}
+.btn-sm.danger{border-color:#dc3545;color:#ff6b7a}
+.btn-sm.danger:hover{background:#dc3545;color:#fff}
+
+.container{padding:2rem;max-width:1500px;margin:0 auto}
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1.5rem;margin-bottom:2rem}
+.stat-box{background:linear-gradient(135deg,var(--black-card),var(--black-soft));border:1px solid var(--black-border);
+  border-radius:15px;padding:1.5rem;transition:.3s;position:relative;overflow:hidden}
+.stat-box::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,var(--gold-light),var(--gold-deep))}
+.stat-box:hover{transform:translateY(-3px);border-color:var(--gold);box-shadow:0 10px 30px rgba(212,175,55,.15)}
+.stat-box .icon{width:50px;height:50px;border-radius:12px;background:linear-gradient(135deg,var(--gold-light),var(--gold-deep));
+  display:flex;align-items:center;justify-content:center;color:#000;font-size:1.4rem;margin-bottom:1rem}
+.stat-box .num{font-family:'Cinzel',serif;font-size:2rem;color:var(--gold);font-weight:800}
+.stat-box .lbl{color:var(--text-dim);font-size:.8rem;text-transform:uppercase;letter-spacing:2px;margin-top:.3rem}
+
+.toolbar{display:flex;gap:1rem;margin-bottom:1.5rem;flex-wrap:wrap;align-items:center}
+.search-box{flex:1;min-width:250px;position:relative}
+.search-box i{position:absolute;left:1rem;top:50%;transform:translateY(-50%);color:var(--gold)}
+.search-box input{width:100%;padding:.8rem 1rem .8rem 2.8rem;background:var(--black-card);
+  border:1px solid var(--black-border);border-radius:50px;color:#fff;font-size:.9rem;transition:.3s}
+.search-box input:focus{outline:none;border-color:var(--gold)}
+
+.table-wrap{background:linear-gradient(135deg,var(--black-card),var(--black-soft));
+  border:1px solid var(--black-border);border-radius:15px;overflow:hidden}
+.table-scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:1200px}
+thead{background:linear-gradient(135deg,#0a0a0a,#000)}
+thead th{padding:1rem;text-align:left;color:var(--gold);font-size:.75rem;
+  text-transform:uppercase;letter-spacing:2px;border-bottom:1px solid rgba(212,175,55,.2);white-space:nowrap;font-weight:600}
+tbody tr{transition:.2s;border-bottom:1px solid rgba(255,255,255,.04)}
+tbody tr:hover{background:rgba(212,175,55,.05)}
+tbody td{padding:1rem;font-size:.85rem;vertical-align:top}
+.pill{display:inline-block;padding:.25rem .7rem;background:rgba(212,175,55,.1);
+  color:var(--gold);border-radius:20px;font-size:.75rem;border:1px solid rgba(212,175,55,.3);white-space:nowrap}
+.del-btn{background:rgba(220,53,69,.15);color:#ff6b7a;border:1px solid #dc3545;
+  padding:.4rem .7rem;border-radius:8px;cursor:pointer;font-size:.75rem;transition:.3s}
+.del-btn:hover{background:#dc3545;color:#fff}
+.empty{padding:4rem 2rem;text-align:center;color:var(--text-dim)}
+.empty i{font-size:3rem;color:var(--gold);opacity:.4;margin-bottom:1rem;display:block}
+
+.detail-modal{position:fixed;inset:0;background:rgba(0,0,0,.9);backdrop-filter:blur(10px);
+  display:none;align-items:center;justify-content:center;z-index:1000;padding:2rem}
+.detail-modal.active{display:flex}
+.detail-box{background:linear-gradient(135deg,var(--black-card),var(--black-soft));
+  border:1px solid var(--gold);border-radius:20px;max-width:600px;width:100%;padding:2.5rem;
+  max-height:90vh;overflow-y:auto}
+.detail-box h2{font-family:'Cinzel',serif;color:var(--gold);margin-bottom:1.5rem;text-align:center;letter-spacing:2px}
+.detail-row{display:grid;grid-template-columns:140px 1fr;gap:1rem;padding:.7rem 0;border-bottom:1px solid var(--black-border)}
+.detail-row .k{color:var(--text-dim);text-transform:uppercase;font-size:.75rem;letter-spacing:1.5px}
+.detail-row .v{color:#fff;font-weight:500;word-break:break-word}
+.close-x{float:right;width:35px;height:35px;border-radius:50%;background:transparent;
+  border:1px solid var(--gold);color:var(--gold);cursor:pointer;font-size:1rem;transition:.3s}
+.close-x:hover{background:var(--gold);color:#000;transform:rotate(90deg)}
+
+@media(max-width:768px){
+  .topbar{flex-direction:column;align-items:stretch}
+  .container{padding:1rem}
+}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div class="login-wrap" id="loginWrap">
+  <div class="login-card">
+    <div class="crown"><i class="fas fa-crown"></i></div>
+    <h1>ADMIN PANEL</h1>
+    <p>Elite Fitness — Secure access only</p>
+    <div class="alert" id="loginAlert"></div>
+    <input type="password" id="passwordInput" placeholder="Enter admin password" autocomplete="off"/>
+    <button class="btn-gold" id="loginBtn" onclick="login()">
+      <i class="fas fa-lock-open"></i> &nbsp;Unlock
+    </button>
+  </div>
+</div>
+
+<!-- DASHBOARD -->
+<div class="dashboard" id="dashboard">
+  <div class="topbar">
+    <div class="brand"><i class="fas fa-crown"></i> ELITE FITNESS — ADMIN</div>
+    <div class="topbar-actions">
+      <button class="btn-sm" onclick="loadEntries()"><i class="fas fa-rotate"></i> Refresh</button>
+      <button class="btn-sm" onclick="exportCSV()"><i class="fas fa-download"></i> Export CSV</button>
+      <button class="btn-sm danger" onclick="deleteAll()"><i class="fas fa-trash"></i> Delete All</button>
+      <button class="btn-sm" onclick="logout()"><i class="fas fa-sign-out-alt"></i> Logout</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="stats-row">
+      <div class="stat-box"><div class="icon"><i class="fas fa-users"></i></div><div class="num" id="statTotal">0</div><div class="lbl">Total Entries</div></div>
+      <div class="stat-box"><div class="icon"><i class="fas fa-dumbbell"></i></div><div class="num" id="statMuscle">0</div><div class="lbl">Build Muscle</div></div>
+      <div class="stat-box"><div class="icon"><i class="fas fa-fire"></i></div><div class="num" id="statLose">0</div><div class="lbl">Lose Weight</div></div>
+      <div class="stat-box"><div class="icon"><i class="fas fa-heart"></i></div><div class="num" id="statFit">0</div><div class="lbl">Stay Fit</div></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="search-box">
+        <i class="fas fa-search"></i>
+        <input id="searchInput" placeholder="Search by name, email, phone, goal..." oninput="renderTable()"/>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <div class="table-scroll">
+        <table>
+          <thead><tr>
+            <th>ID</th><th>Name</th><th>Email</th><th>Phone</th><th>Residency</th>
+            <th>Goal</th><th>Level</th><th>Weight</th><th>Days/Wk</th>
+            <th>Submitted</th><th>Actions</th>
+          </tr></thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="emptyState" style="display:none">
+        <i class="fas fa-inbox"></i>
+        <p>No entries yet. Submissions from the website will appear here.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- DETAIL MODAL -->
+<div class="detail-modal" id="detailModal">
+  <div class="detail-box">
+    <button class="close-x" onclick="closeDetail()"><i class="fas fa-times"></i></button>
+    <h2 style="clear:both">Application Detail</h2>
+    <div id="detailContent"></div>
+  </div>
+</div>
+
+<script>
+let TOKEN = localStorage.getItem('ef_token') || '';
+let ENTRIES = [];
+
+function show(el){el.style.display='block'}
+function hide(el){el.style.display='none'}
+
+window.addEventListener('DOMContentLoaded',()=>{
+  if(TOKEN) verifyAndLoad();
+  document.getElementById('passwordInput').addEventListener('keypress',e=>{if(e.key==='Enter') login();});
+});
+
+async function verifyAndLoad(){
+  // try loading entries; if 401, drop token
+  try{
+    const r = await fetch('/api/admin/entries',{headers:{Authorization:'Bearer '+TOKEN}});
+    if(r.status===401){ localStorage.removeItem('ef_token'); TOKEN=''; return; }
+    const j = await r.json();
+    if(!j.success) throw new Error();
+    ENTRIES = j.entries;
+    hide(document.getElementById('loginWrap'));
+    document.getElementById('dashboard').classList.add('active');
+    renderTable();
+  }catch(e){
+    localStorage.removeItem('ef_token'); TOKEN='';
   }
-  db.prepare('DELETE FROM applications WHERE id = ?').run(req.params.id);
-  res.json({ success: true });
-});
-
-/* ---------- ADMIN: EXPORT APPLICATION AS ZIP ---------- */
-app.get('/api/admin/export/:id', requireAdmin, (req, res) => {
-  const app = db.prepare('SELECT * FROM applications WHERE id = ?').get(req.params.id);
-  if (!app) return res.status(404).json({ error: 'Not found' });
-
-  res.attachment(`application-${app.id}-${app.username}.zip`);
-  const archive = archiver('zip', { zlib: { level: 9 } });
-  archive.pipe(res);
-
-  const meta = {
-    ...app,
-    classy_photos: safeParse(app.classy_photos),
-    other_photos:  safeParse(app.other_photos),
-    videos:        safeParse(app.videos)
-  };
-  archive.append(JSON.stringify(meta, null, 2), { name: 'application.json' });
-
-  [app.profile_picture, ...safeParse(app.classy_photos),
-   ...safeParse(app.other_photos), ...safeParse(app.videos)]
-     .filter(Boolean).forEach(fn => {
-       const p = path.join(UPLOADS_DIR, fn);
-       if (fs.existsSync(p)) archive.file(p, { name: fn });
-     });
-  archive.finalize();
-});
-
-/* ---------- ADMIN: EXPORT ALL DATA ---------- */
-app.get('/api/admin/export-all', requireAdmin, (req, res) => {
-  const apps = db.prepare('SELECT * FROM applications ORDER BY created_at DESC').all();
-  const users = db.prepare('SELECT id, username, email, created_at FROM users').all();
-
-  res.attachment(`utamu-export-${Date.now()}.zip`);
-  const archive = archiver('zip', { zlib: { level: 9 } });
-  archive.pipe(res);
-  archive.append(JSON.stringify({ applications: apps, users }, null, 2), { name: 'export.json' });
-
-  // CSV
-  const headers = ['id','username','official_name','email','mpesa_number','whatsapp_number','county','category','status','created_at'];
-  const csv = [headers.join(',')].concat(
-    apps.map(a => headers.map(h => `"${(a[h]||'').toString().replace(/"/g,'""')}"`).join(','))
-  ).join('\n');
-  archive.append(csv, { name: 'applications.csv' });
-
-  // Append all media files
-  apps.forEach(app => {
-    [app.profile_picture, ...safeParse(app.classy_photos),
-     ...safeParse(app.other_photos), ...safeParse(app.videos)]
-       .filter(Boolean).forEach(fn => {
-         const p = path.join(UPLOADS_DIR, fn);
-         if (fs.existsSync(p)) archive.file(p, { name: `media/${app.id}/${fn}` });
-       });
-  });
-  archive.finalize();
-});
-
-/* ---------- UTIL ---------- */
-function safeParse(s) {
-  try { return JSON.parse(s) || []; } catch { return []; }
 }
 
-/* ---------- START ---------- */
+async function login(){
+  const pw = document.getElementById('passwordInput').value.trim();
+  const alertBox = document.getElementById('loginAlert');
+  const btn = document.getElementById('loginBtn');
+  alertBox.className='alert';alertBox.textContent='';
+  if(!pw){alertBox.className='alert error';alertBox.textContent='Please enter password';return;}
+  btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> &nbsp;Verifying...';
+  try{
+    const r = await fetch('/api/admin/login',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({password:pw})
+    });
+    const j = await r.json();
+    if(!r.ok || !j.success) throw new Error(j.message||'Login failed');
+    TOKEN = j.token;
+    localStorage.setItem('ef_token', TOKEN);
+    await verifyAndLoad();
+  }catch(e){
+    alertBox.className='alert error';
+    alertBox.textContent = e.message;
+  }finally{
+    btn.disabled=false; btn.innerHTML='<i class="fas fa-lock-open"></i> &nbsp;Unlock';
+  }
+}
+
+async function loadEntries(){
+  try{
+    const r = await fetch('/api/admin/entries',{headers:{Authorization:'Bearer '+TOKEN}});
+    const j = await r.json();
+    if(!j.success) throw new Error();
+    ENTRIES = j.entries;
+    renderTable();
+  }catch(e){alert('Failed to load entries');}
+}
+
+function renderTable(){
+  const q = document.getElementById('searchInput').value.toLowerCase();
+  const filtered = ENTRIES.filter(e => !q || JSON.stringify(e).toLowerCase().includes(q));
+  const tbody = document.getElementById('tableBody');
+  const empty = document.getElementById('emptyState');
+  tbody.innerHTML='';
+  if(filtered.length===0){show(empty);} else {hide(empty);}
+  filtered.forEach(e=>{
+    const tr = document.createElement('tr');
+    tr.style.cursor='pointer';
+    tr.innerHTML = \`
+      <td><span class="pill">#\${e.id}</span></td>
+      <td><b>\${escapeHtml(e.name)}</b></td>
+      <td>\${escapeHtml(e.email)}</td>
+      <td>\${escapeHtml(e.phone)}</td>
+      <td>\${escapeHtml(e.residency)}</td>
+      <td><span class="pill">\${escapeHtml(e.goal)}</span></td>
+      <td>\${escapeHtml(e.level)}</td>
+      <td>\${escapeHtml(e.weight)} kg</td>
+      <td>\${escapeHtml(e.frequency)}</td>
+      <td>\${new Date(e.createdAt).toLocaleDateString()} <br><small style="color:#888">\${new Date(e.createdAt).toLocaleTimeString()}</small></td>
+      <td>
+        <button class="del-btn" onclick="event.stopPropagation();deleteEntry(\${e.id})"><i class="fas fa-trash"></i></button>
+      </td>\`;
+    tr.addEventListener('click',()=>showDetail(e));
+    tbody.appendChild(tr);
+  });
+  // stats
+  document.getElementById('statTotal').textContent = ENTRIES.length;
+  document.getElementById('statMuscle').textContent = ENTRIES.filter(e=>e.goal==='Build Muscle').length;
+  document.getElementById('statLose').textContent = ENTRIES.filter(e=>e.goal==='Lose Weight').length;
+  document.getElementById('statFit').textContent = ENTRIES.filter(e=>e.goal==='Stay Fit').length;
+}
+
+function escapeHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c])}
+
+function showDetail(e){
+  const labels = {
+    id:'ID',name:'Full Name',email:'Email',phone:'Phone',residency:'Residency',
+    goal:'Fitness Goal',level:'Fitness Level',weight:'Weight (kg)',
+    frequency:'Workout Frequency',injuries:'Injuries',
+    experience:'Fitness Experience',timeline:'Goal Timeline',createdAt:'Submitted At'
+  };
+  const c = document.getElementById('detailContent');
+  c.innerHTML = Object.keys(labels).map(k=>{
+    let v = e[k]||'-';
+    if(k==='createdAt') v = new Date(v).toLocaleString();
+    return \`<div class="detail-row"><div class="k">\${labels[k]}</div><div class="v">\${escapeHtml(v)}</div></div>\`;
+  }).join('');
+  document.getElementById('detailModal').classList.add('active');
+}
+function closeDetail(){document.getElementById('detailModal').classList.remove('active');}
+
+async function deleteEntry(id){
+  if(!confirm('Delete entry #'+id+'?')) return;
+  try{
+    const r = await fetch('/api/admin/entries/'+id,{method:'DELETE',headers:{Authorization:'Bearer '+TOKEN}});
+    const j = await r.json();
+    if(!j.success) throw new Error();
+    ENTRIES = ENTRIES.filter(e=>e.id!==id);
+    renderTable();
+  }catch(e){alert('Delete failed');}
+}
+
+async function deleteAll(){
+  if(!confirm('PERMANENTLY delete ALL entries? This cannot be undone.')) return;
+  if(!confirm('Are you ABSOLUTELY sure? All client applications will be lost.')) return;
+  try{
+    const r = await fetch('/api/admin/entries',{method:'DELETE',headers:{Authorization:'Bearer '+TOKEN}});
+    const j = await r.json();
+    if(!j.success) throw new Error();
+    ENTRIES = [];
+    renderTable();
+  }catch(e){alert('Delete failed');}
+}
+
+function exportCSV(){
+  window.location = '/api/admin/export?token='+encodeURIComponent(TOKEN);
+}
+
+async function logout(){
+  try{ await fetch('/api/admin/logout',{method:'POST',headers:{Authorization:'Bearer '+TOKEN}}); }catch(e){}
+  localStorage.removeItem('ef_token');
+  TOKEN=''; ENTRIES=[];
+  document.getElementById('dashboard').classList.remove('active');
+  show(document.getElementById('loginWrap'));
+  document.getElementById('passwordInput').value='';
+}
+</script>
+</body>
+</html>`;
+
+// ----- START -----
 app.listen(PORT, () => {
-  console.log('╔════════════════════════════════════════════╗');
-  console.log('║   UTAMU AGENCY BACKEND IS RUNNING          ║');
-  console.log('╠════════════════════════════════════════════╣');
-  console.log(`║   Port:        ${PORT.toString().padEnd(28)}║`);
-  console.log(`║   Data dir:    ${DATA_DIR.padEnd(28)}║`);
-  console.log(`║   Admin email: ${ADMIN_EMAIL.padEnd(28)}║`);
-  console.log('╚════════════════════════════════════════════╝');
+  console.log('====================================');
+  console.log('🏋️  ELITE FITNESS BACKEND RUNNING');
+  console.log('Port:', PORT);
+  console.log('DB:  ', DB_PATH);
+  console.log('Admin: /admin');
+  console.log('====================================');
 });
